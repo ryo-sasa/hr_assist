@@ -1,0 +1,5 @@
+
+PyMuPDF
+PyPDF2
+tqdm
+unicodedata

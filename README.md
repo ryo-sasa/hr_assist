@@ -5,4 +5,8 @@
 - combine-resize.py
 - ocr.py
 
-
+## 必要なパッケージのインストール
+```
+pip install -r requirements.txt
+```
+上記を実行する
