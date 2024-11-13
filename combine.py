@@ -9,7 +9,8 @@ import pandas as pd
 # 入力フォルダの指定
 input_folder_path = './input_combine'  # input_combine フォルダのパスに変更
 # 現在の日付でoutputフォルダを作成
-output_folder_path = f"./{datetime.now().strftime('%Y%m%d')}_output"
+output_folder_name = f"{datetime.now().strftime('%Y%m%d')}_output"
+output_folder_path = f"./{output_folder_name}"
 os.makedirs(output_folder_path, exist_ok=True)
 
 print(f"入力フォルダ: {input_folder_path}")
@@ -112,7 +113,9 @@ for idx, (row, files) in enumerate(tqdm(file_groups.items()), 1):
 print("ファイルの結合と整理が完了しました。")
 
 # ログをExcelファイルに出力
-log_file_path = os.path.join(output_folder_path, 'log.xlsx')
+# ログファイル名を「フォルダ名＋ログ.xlsx」に変更
+log_file_name = f"{output_folder_name}ログ.xlsx"
+log_file_path = os.path.join(output_folder_path, log_file_name)
 df = pd.DataFrame(file_statuses)
 df.to_excel(log_file_path, index=False)
 
