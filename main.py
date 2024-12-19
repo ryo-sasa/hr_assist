@@ -1,146 +1,213 @@
-import pytesseract
-from pdf2image import convert_from_path
-import pandas as pd
 import os
-import re
-import cv2
-import numpy as np
-import fitz  # PyMuPDF
+import io
+import fitz
+from datetime import datetime
+from collections import defaultdict
 import unicodedata
+from tqdm import tqdm
+import pandas as pd
+from PIL import Image
+import numpy as np
+import cv2
 
-# OCRの設定
-pytesseract.pytesseract.tesseract_cmd = '/opt/homebrew/bin/tesseract'
+# ========== 設定セクション ==========
+input_folder_path = './input_combine'
+limit_size = 9 * (1024 * 1024)  # 9MB上限
 
-# A4サイズのPDFの実寸とDPI設定
-A4_WIDTH_CM = 21.0
-A4_HEIGHT_CM = 29.7
-DPI = 300  # 解像度 (dots per inch)
-CM_TO_INCH = 2.54
+dnn_prototxt = 'deploy.prototxt'
+dnn_model = 'res10_300x300_ssd_iter_140000.caffemodel'
+dnn_confidence_threshold = 0.3  # 顔とみなす最低信頼度
 
-# cm単位からピクセル単位に変換
-def cm_to_px(cm, dpi=DPI):
-    return int((cm / CM_TO_INCH) * dpi)
+dpi_for_face_detection = 300  # 高DPIで画像化
 
-# 指定領域から画像を抽出
-def extract_image_region(pdf_path, page_num, top_left_cm, bottom_right_cm):
-    doc = fitz.open(pdf_path)
-    page = doc.load_page(page_num)  # ページを取得
-    
-    # A4サイズで指定の領域をピクセルに変換
-    top_left_px = (cm_to_px(top_left_cm[0]), cm_to_px(top_left_cm[1]))
-    bottom_right_px = (cm_to_px(bottom_right_cm[0]), cm_to_px(bottom_right_cm[1]))
-    
-    print(f"Extracting region from {top_left_px} to {bottom_right_px} in pixels")  # デバッグログ
-    
-    # 領域を指定して画像を抽出
-    pix = page.get_pixmap(clip=fitz.Rect(top_left_px[0], top_left_px[1], bottom_right_px[0], bottom_right_px[1]))
-    
-    # 画像を numpy 配列に変換
-    if pix.samples:  # pix.samples が空でないか確認
-        img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
-        if pix.n == 4:  # RGBAの場合
-            img = cv2.cvtColor(img, cv2.COLOR_RGBA2RGB)
-    else:
-        print("Error: Failed to extract image region. The extracted region is empty.")
-        img = None
-    
-    doc.close()
-    return img
+output_folder_name = f"{datetime.now().strftime('%Y%m%d')}_output"
+output_folder_path = f"./{output_folder_name}"
+os.makedirs(output_folder_path, exist_ok=True)
 
-# 画像を前処理（グレースケール化、ノイズ除去、二値化など）
-def preprocess_image(image):
-    if image is None:
-        raise ValueError("The input image is empty, cannot preprocess")
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    denoised = cv2.GaussianBlur(gray, (5, 5), 0)
-    _, binary = cv2.threshold(denoised, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    equalized = cv2.equalizeHist(binary)
-    kernel = np.array([[0, -1, 0], [-1, 5,-1], [0, -1, 0]])
-    sharpened = cv2.filter2D(equalized, -1, kernel)
-    return sharpened
+print(f"入力フォルダ: {input_folder_path}")
+print(f"出力フォルダ: {output_folder_path}")
 
-# 銀行コード、支店コード、口座番号を抽出する正規表現を使った解析
-def extract_bank_info(text):
-    bank_code_pattern = r'[^\d]([0-9]{4})[^\d]'  # 4桁の銀行コード
-    branch_code_pattern = r'[^\d]([0-9]{3})[^\d]'  # 3桁の支店コード
-    account_number_pattern = r'[^\d]([0-9]{6})[^\d]'  # 6桁の口座番号
-    
-    bank_code = re.search(bank_code_pattern, text)
-    branch_code = re.search(branch_code_pattern, text)
-    account_number = re.search(account_number_pattern, text)
-    
-    return {
-        '銀行コード': bank_code.group(1) if bank_code else None,
-        '支店コード': branch_code.group(1) if branch_code else None,
-        '口座番号': account_number.group(1) if account_number else None
-    }
+rows = {
+    'ア行': 'アイウエオ',
+    'カ行': 'カキクケコ',
+    'サ行': 'サシスセソ',
+    'タ行': 'タチツテト',
+    'ナ行': 'ナニヌネノ',
+    'ハ行': 'ハヒフヘホ',
+    'マ行': 'マミムメモ',
+    'ヤ行': 'ヤユヨ',
+    'ラ行': 'ラリルレロ',
+    'ワ行': 'ワヲン'
+}
 
-# 画像からテキストを抽出
-def ocr_image(image):
-    preprocessed_image = preprocess_image(image)
-    return pytesseract.image_to_string(preprocessed_image, lang='jpn')
+file_groups = defaultdict(list)
+file_statuses = []
 
-# PDFから指定領域をOCRするメイン処理
-def process_pdf(pdf_path):
-    # 4つの領域の指定 (縦横: 左上、右上、左下、右下) in cm
-    regions = [
-        ((13.5, 1), (18, 19)),   # 領域1
-        ((13.5, 19), (18, 19)),  # 領域2
-        ((13.5, 1), (18, 19)),   # 領域3
-        ((13.5, 19), (18, 19))   # 領域4
-    ]
-    
-    extracted_text = ""
-    for idx, region in enumerate(regions):
-        top_left, bottom_right = region
-        img = extract_image_region(pdf_path, 0, top_left, bottom_right)  # 0ページ目を処理
-        
-        if img is None:
-            print(f"Skipping region {idx + 1} due to extraction failure.")
-            continue
-        
-        extracted_text += ocr_image(img)
-    
-    # OCR結果を確認
-    print("OCR結果:\n", extracted_text)
-    
-    # 銀行コード、支店コード、口座番号を抽出
-    bank_info = extract_bank_info(extracted_text)
-    
-    return bank_info
+subfolders = os.listdir(input_folder_path)
+print(f"サブフォルダの数: {len(subfolders)}")
 
-# ファイル名の最初の文字に基づいて50音順にソートするためのヘルパー関数
-def sort_key(file_name):
-    first_char = file_name[0]
-    first_char = unicodedata.normalize('NFKC', first_char)  # 文字を正規化
-    return first_char
+print("ファイルを分類中...")
+for subfolder_name in tqdm(subfolders):
+    subfolder_path = os.path.join(input_folder_path, subfolder_name)
+    if os.path.isdir(subfolder_path):
+        print(f"現在処理中のサブフォルダ: {subfolder_name}")
+        for file_name in os.listdir(subfolder_path):
+            if file_name.endswith('.pdf'):
+                print(f"処理中のファイル: {file_name}")
+                file_path = os.path.join(subfolder_path, file_name)
+                status_record = {
+                    'ファイルパス': file_path,
+                    '状態': '未結合',
+                    '分類': 'なし'
+                }
 
-# 指定フォルダ内のすべてのPDFファイルを処理する関数
-def process_all_pdfs_in_folder(input_folder, output_csv):
-    all_data = []
-    
-    for file_name in os.listdir(input_folder):
-        if file_name.endswith('.pdf'):
-            pdf_path = os.path.join(input_folder, file_name)
-            print(f"処理中: {pdf_path}")
-            
-            bank_info = process_pdf(pdf_path)  # PDFを処理
-            
-            all_data.append({
-                'ファイル名': file_name,
-                '銀行コード': bank_info['銀行コード'],
-                '支店コード': bank_info['支店コード'],
-                '口座番号': bank_info['口座番号']
-            })
-    
-    # ファイル名の50音順でソート
-    all_data = sorted(all_data, key=lambda x: sort_key(x['ファイル名']))
-    
-    df = pd.DataFrame(all_data)
-    df.to_csv(output_csv, index=False, encoding='utf-8-sig')
-    print(f"結果が {output_csv} に保存されました")
+                first_char = unicodedata.normalize('NFKC', file_name[0])
+                for row, chars in rows.items():
+                    if first_char in chars:
+                        file_groups[row].append(file_path)
+                        status_record['状態'] = '結合予定'
+                        status_record['分類'] = row
+                        print(f"{file_name} は {row} に分類されました")
+                        break
+                else:
+                    print(f"{file_name} は 50音順に対応しません")
 
-# 実行例
-input_folder_path = './input_ocr'  # PDFファイルが含まれるフォルダ
-output_csv_path = '銀行情報.csv'  # 保存先のCSVファイル名
-process_all_pdfs_in_folder(input_folder_path, output_csv_path)
+                file_statuses.append(status_record)
+
+# DNNによる顔検出モデル読み込み
+net = cv2.dnn.readNetFromCaffe(dnn_prototxt, dnn_model)
+
+def is_photo_page(page, dpi=300, net=None, confidence_threshold=0.5):
+    """
+    DNNを用いて顔検出を行い、confidence_threshold以上の信頼度で顔が検出されれば写真ページとみなす
+    """
+    pix = page.get_pixmap(dpi=dpi)
+    img = Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGB")
+    img_cv = np.array(img)
+    (h, w) = img_cv.shape[:2]
+
+    # DNN用にblob作成
+    blob = cv2.dnn.blobFromImage(cv2.resize(img_cv, (300, 300)), 1.0, (300, 300), (104.0, 177.0, 123.0))
+    net.setInput(blob)
+    detections = net.forward()
+
+    face_count = 0
+    for i in range(detections.shape[2]):
+        confidence = detections[0, 0, i, 2]
+        if confidence > confidence_threshold:
+            face_count += 1
+
+    print(f"顔検出数: {face_count}, 閾値: {confidence_threshold}")
+    return face_count > 0
+
+
+def split_pdf_if_large(pdf_bytes: bytes, base_output_path: str, limit_size=9*(1024*1024), photo_info=None):
+    if len(pdf_bytes) <= limit_size:
+        with open(base_output_path, 'wb') as f:
+            f.write(pdf_bytes)
+        print(f"{base_output_path} の結合が完了しました (分割不要)")
+        return
+
+    print(f"PDFが大きすぎるため分割を開始します: {base_output_path}")
+    reader = fitz.open(stream=pdf_bytes, filetype="pdf")
+    total_pages = len(reader)
+    print(f"元のPDFページ数: {total_pages}ページ")
+
+    if photo_info is None or len(photo_info) != total_pages:
+        photo_info = [False]*total_pages
+
+    base_name, ext = os.path.splitext(base_output_path)
+    part_number = 1
+    page_index = 0
+
+    while page_index < total_pages:
+        # 写真ページを探す
+        while page_index < total_pages and not photo_info[page_index]:
+            print(f"ページ{page_index+1}: 写真ページでないためスキップ")
+            page_index += 1
+
+        if page_index >= total_pages:
+            print("写真ページが見つからずファイル末尾。これ以上分割パートなし。")
+            break
+
+        part_doc = fitz.open()
+        pages_in_part = 0
+        part_size = 0
+
+        while page_index < total_pages:
+            part_doc.insert_pdf(reader, from_page=page_index, to_page=page_index)
+            temp_stream = io.BytesIO()
+            part_doc.save(temp_stream, garbage=4, deflate=True)
+            new_size = len(temp_stream.getvalue())
+            if new_size > limit_size:
+                if pages_in_part == 0:
+                    print(f"ページ{page_index+1}が単独で9MB超。1ページのみで出力します。")
+                    pages_in_part = 1
+                    page_index += 1
+                else:
+                    part_doc.delete_page(-1)
+                break
+            else:
+                pages_in_part += 1
+                part_size = new_size
+                page_index += 1
+
+        output_part_path = f"{base_name}-{part_number}{ext}"
+        print(f"出力パート: {output_part_path}, {pages_in_part}ページ, 約{part_size/1024/1024:.2f}MB")
+        with open(output_part_path, 'wb') as f_out:
+            part_doc.save(f_out, garbage=4, deflate=True)
+        part_number += 1
+
+    reader.close()
+    print(f"{base_output_path} の分割が完了しました")
+
+
+print("PDFを結合中...")
+for idx, (row, files) in enumerate(tqdm(file_groups.items()), 1):
+    if files:
+        print(f"{row} に含まれるファイル数: {len(files)}")
+        sorted_files = sorted(files, key=lambda f: unicodedata.normalize('NFKC', os.path.basename(f)))
+        print("結合対象ファイル一覧:", sorted_files)
+
+        merged_doc = fitz.open()
+        for pdf_file in sorted_files:
+            print(f"結合中のPDFファイル: {pdf_file}")
+            try:
+                with fitz.open(pdf_file) as src_doc:
+                    merged_doc.insert_pdf(src_doc)
+                for status in file_statuses:
+                    if status['ファイルパス'] == pdf_file:
+                        status['状態'] = '結合済'
+                        break
+            except Exception as e:
+                print(f"{pdf_file} の処理中にエラー: {e}")
+                for status in file_statuses:
+                    if status['ファイルパス'] == pdf_file:
+                        status['状態'] = f'エラー: {e}'
+                        break
+
+        print(f"結合後PDFページ数: {len(merged_doc)}ページ")
+
+        # 顔検出による写真ページ判定
+        photo_info = []
+        for i, page in enumerate(merged_doc):
+            face_page = is_photo_page(page, dpi=dpi_for_face_detection, net=net, confidence_threshold=dnn_confidence_threshold)
+            photo_info.append(face_page)
+            print(f"ページ{i+1}: {'写真ページ(顔検出成功)' if face_page else '非写真ページ'}")
+
+        output_pdf_path = os.path.join(output_folder_path, f"{subfolder_name}_{row}.pdf")
+        pdf_stream = io.BytesIO()
+        merged_doc.save(pdf_stream, garbage=4, deflate=True)
+        merged_doc.close()
+
+        pdf_bytes = pdf_stream.getvalue()
+        print(f"出力PDF: {output_pdf_path}, サイズ約{len(pdf_bytes)/1024/1024:.2f}MB")
+        split_pdf_if_large(pdf_bytes, output_pdf_path, limit_size=limit_size, photo_info=photo_info)
+
+print("ファイルの結合と整理が完了しました。")
+
+log_file_name = f"{output_folder_name}ログ.xlsx"
+log_file_path = os.path.join(output_folder_path, log_file_name)
+df = pd.DataFrame(file_statuses)
+df.to_excel(log_file_path, index=False)
+print(f"ログファイルが {log_file_path} に出力されました。")
