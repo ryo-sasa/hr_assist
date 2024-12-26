@@ -6,12 +6,12 @@ from collections import defaultdict
 import unicodedata
 from tqdm import tqdm
 import pandas as pd
+import shutil
 
 # 入力フォルダの指定
 input_folder_path = './input_combine'  # input_combineフォルダのパス
-# 現在の日付でoutputフォルダを作成
 output_folder_name = f"{datetime.now().strftime('%Y%m%d')}_output"
-output_folder_path = f"./{output_folder_name}"
+output_folder_path = os.path.join(".", output_folder_name)
 os.makedirs(output_folder_path, exist_ok=True)
 
 print(f"入力フォルダ: {input_folder_path}")
@@ -33,15 +33,25 @@ rows = {
 
 file_statuses = []
 
-# inputフォルダ内のすべてのサブフォルダを取得
 subfolders = os.listdir(input_folder_path)
 print(f"サブフォルダの数: {len(subfolders)}")
 
 print("ファイルを分類中...")
 
+
+def clean_filename(filename: str) -> str:
+    """
+    Windowsで使用できない文字を置き換える
+    """
+    invalid_chars = r'<>:"/\|?*'
+    for char in invalid_chars:
+        filename = filename.replace(char, "_")
+    return filename
+
+
 def split_pdf_if_large(pdf_bytes: bytes, base_output_path: str, limit_size=9*(1024*1024)):
     """
-    PDFを9MBごとに分割する関数(以前使用したロジックを再掲)
+    PDFを9MBごとに分割する関数
     """
     if len(pdf_bytes) <= limit_size:
         with open(base_output_path, 'wb') as f:
@@ -69,7 +79,6 @@ def split_pdf_if_large(pdf_bytes: bytes, base_output_path: str, limit_size=9*(10
             new_size = len(temp_stream.getvalue())
 
             if new_size > limit_size:
-                # このページ追加でオーバーするので削除して確定出力
                 part_doc.delete_page(-1)
                 break
             else:
@@ -77,7 +86,6 @@ def split_pdf_if_large(pdf_bytes: bytes, base_output_path: str, limit_size=9*(10
                 part_pages += 1
 
         if part_pages == 0:
-            # 1ページも追加できない場合(単ページ9MB超え)
             part_doc = fitz.open()
             part_doc.insert_pdf(reader, from_page=page_start, to_page=page_start)
             temp_stream = io.BytesIO()
@@ -85,10 +93,18 @@ def split_pdf_if_large(pdf_bytes: bytes, base_output_path: str, limit_size=9*(10
             current_size = len(temp_stream.getvalue())
             part_pages = 1
 
+        # 手動で一時ファイルを生成して保存
+        temp_file_name = f"{base_name}_temp_{part_number}{ext}"
+        part_doc.save(temp_file_name, garbage=4, deflate=True)
+
+        # 保存した一時ファイルを移動
         output_part_path = f"{base_name}-{part_number}{ext}"
-        with open(output_part_path, 'wb') as f_out:
-            part_doc.save(f_out, garbage=4, deflate=True)
-        print(f"{output_part_path} に分割保存しました ({part_pages}ページ, 約{current_size/1024/1024:.2f}MB)")
+        try:
+            shutil.move(temp_file_name, output_part_path)
+            print(f"{output_part_path} に分割保存しました ({part_pages}ページ, 約{current_size/1024/1024:.2f}MB)")
+        except Exception as e:
+            print(f"一時ファイルの移動中にエラーが発生しました: {e}")
+            os.unlink(temp_file_name)
 
         part_number += 1
         page_start += part_pages
@@ -103,7 +119,7 @@ for subfolder_name in tqdm(subfolders):
         print(f"現在処理中のサブフォルダ: {subfolder_name}")
 
         # サブフォルダ専用の出力フォルダを作成
-        sub_output_folder_path = os.path.join(output_folder_path, subfolder_name)
+        sub_output_folder_path = os.path.join(output_folder_path, clean_filename(subfolder_name))
         os.makedirs(sub_output_folder_path, exist_ok=True)
 
         file_groups = defaultdict(list)
@@ -165,7 +181,7 @@ for subfolder_name in tqdm(subfolders):
                 merger.close()
 
                 pdf_bytes = pdf_stream.getvalue()
-                output_pdf_path = os.path.join(sub_output_folder_path, f"{subfolder_name}_{row}.pdf")
+                output_pdf_path = os.path.join(sub_output_folder_path, clean_filename(f"{subfolder_name}_{row}.pdf"))
 
                 # フォルダ名に「履歴書」が含まれるか判定
                 if "履歴書" in subfolder_name:
@@ -181,9 +197,8 @@ for subfolder_name in tqdm(subfolders):
 
 print("ファイルの結合と整理が完了しました。")
 
-log_file_name = f"{output_folder_name}ログ.xlsx"
+log_file_name = clean_filename(f"{output_folder_name}ログ.xlsx")
 log_file_path = os.path.join(output_folder_path, log_file_name)
 df = pd.DataFrame(file_statuses)
 df.to_excel(log_file_path, index=False)
 print(f"ログファイルが {log_file_path} にExcel形式で出力されました。")
-
