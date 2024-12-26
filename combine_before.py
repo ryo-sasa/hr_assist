@@ -7,10 +7,10 @@ from tqdm import tqdm
 import pandas as pd
 
 # 入力フォルダの指定
-input_folder_path = './input_combine'  # input_combine フォルダのパスに変更
+input_folder_path = os.path.join(os.getcwd(), 'input_combine')  # input_combine フォルダのパスに変更
 # 現在の日付でoutputフォルダを作成
 output_folder_name = f"{datetime.now().strftime('%Y%m%d')}_output"
-output_folder_path = f"./{output_folder_name}"
+output_folder_path = os.path.join(os.getcwd(), output_folder_name)
 os.makedirs(output_folder_path, exist_ok=True)
 
 print(f"入力フォルダ: {input_folder_path}")
@@ -102,9 +102,15 @@ for idx, (row, files) in enumerate(tqdm(file_groups.items()), 1):
 
         # 結合後のPDFファイルを保存するパス
         output_pdf_path = os.path.join(output_folder_path, f"{subfolder_name}_{row}.pdf")
-        with open(output_pdf_path, 'wb') as f_out:
-            print(f"{output_pdf_path} に保存中...")
-            merger.write(f_out)
+        try:
+            with open(output_pdf_path, 'wb') as f_out:
+                print(f"{output_pdf_path} に保存中...")
+                merger.write(f_out)
+        except Exception as e:
+            print(f"{output_pdf_path} の保存中にエラーが発生しました: {e}")
+            for status in file_statuses:
+                if status['ファイルパス'] in sorted_files:
+                    status['状態'] = f'保存エラー: {e}'
 
         # 結合処理を終了
         merger.close()
@@ -113,7 +119,6 @@ for idx, (row, files) in enumerate(tqdm(file_groups.items()), 1):
 print("ファイルの結合と整理が完了しました。")
 
 # ログをExcelファイルに出力
-# ログファイル名を「フォルダ名＋ログ.xlsx」に変更
 log_file_name = f"{output_folder_name}ログ.xlsx"
 log_file_path = os.path.join(output_folder_path, log_file_name)
 df = pd.DataFrame(file_statuses)
